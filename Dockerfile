@@ -31,18 +31,18 @@ EXPOSE 8000
 
 # Dev: docker build --build-arg HF_AUTH_TOKEN=${HF_AUTH_TOKEN} ...
 # Banana: currently, comment out ARG and set by hand ENV line.
-ARG HF_AUTH_TOKEN
+# ARG HF_AUTH_TOKEN
 ENV HF_AUTH_TOKEN=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
 
 # Hugging face model name or directory
 # "runwayml/stable-diffusion-v1-5", "runwayml/stable-diffusion-inpainting"
 # "CompVis/stable-diffusion-v1-4", "hakurei/waifu-diffusion", etc.
 # ARG MODEL_ID="ALL" # Useful for dev
-ARG MODEL_ID="runwayml/stable-diffusion-v1-5"
+ARG MODEL_ID="runwayml/stable-diffusion-inpainting"
 ENV MODEL_ID=${MODEL_ID}
 
 # ARG PIPELINE="StableDiffusionInpaintPipeline"
-ARG PIPELINE="ALL"
+ARG PIPELINE="StableDiffusionInpaintPipeline"
 ENV PIPELINE=${PIPELINE}
 
 # If set, it will be downloaded and converted to diffusers format, and
