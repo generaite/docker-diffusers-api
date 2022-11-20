@@ -1,5 +1,38 @@
 # CHANGELOG
 
+* **2022-11-08**
+
+  * **Much faster `init()` times!**  For `runwayml/stable-diffusion-v1-5`:
+
+    * Previously: 4.0s, now: 2.4s (40% speed gain)
+
+  * **Much faster `inference()` times!** Particularly from the 2nd inference onwards.
+    Here's a brief comparison of *inference* average times (for 512x512 x50 steps):
+
+    * [Cold] Previously: 3.8s, now: 3.3s (13% speed gain)
+    * [Warm] Previously: 3.2s, now: 2.1s (34% speed gain)
+
+  * **Improved `test.py`**, see [Testing](./README.md#testing)
+
+* **2022-11-05**
+
+  * Upgrade to **Diffusers v0.7.0**.  There is a lot of fun stuff in this release,
+    but notably for docker-diffusers-api TODAY (more fun stuff coming next week!),
+    we have **much faster init times** (via
+    [`fast_load`](https://github.com/huggingface/diffusers/commit/7482178162b779506a54538f2cf2565c8b88c597)
+    ) and the greatly anticipated support for the Euler schedulers (
+    [a1ea8c0](https://github.com/huggingface/diffusers/commit/a1ea8c01c31a44bf48f6a3b85ccabeb45ef6418f)
+    ).
+
+  * We now use the **full scheduler name** for `callInputs.SCHEDULER`.  `"LMS"`,
+    `"DDIM"`, `"PNDM"` all still work fine for now but give a deprecation warning
+    and will stop working in a future update.  The full list of supported schedulers
+    is: `LMSDiscreteScheduler`, `DDIMScheduler`, `PNDMScheduler`,
+    `EulerAncestralDiscreteScheduler`, `EulerDiscreteScheduler`.  These cover the
+    most commonly used / requested schedulers, but we already have code in place to
+    support every scheduler provided by diffusers, which will work in a later
+    diffusers release when they have better defaults.
+
 * **2022-10-24**
 
   * **Fixed img2img and inpainting pipelines**.  To my great shame, in my rush to get

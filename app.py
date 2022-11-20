@@ -15,11 +15,18 @@ from io import BytesIO
 import PIL
 import json
 from loadModel import loadModel
-from send import send
+from send import send, get_now
 import os
+import numpy as np
+import skimage
+import skimage.measure
+from PyPatchMatch import patch_match
+from getScheduler import getScheduler, SCHEDULERS
+import re
 
 MODEL_ID = os.environ.get("MODEL_ID")
 PIPELINE = os.environ.get("PIPELINE")
+HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
 PIPELINES = [
     "StableDiffusionPipeline",
@@ -27,8 +34,6 @@ PIPELINES = [
     "StableDiffusionInpaintPipeline",
     "StableDiffusionInpaintPipelineLegacy",
 ]
-
-SCHEDULERS = ["LMS", "DDIM", "PNDM"]
 
 torch.set_grad_enabled(False)
 
@@ -67,7 +72,9 @@ def init():
     global pipelines
     global schedulers
     global dummy_safety_checker
+    global initTime
 
+    initStart = get_now()
     send(
         "init",
         "start",
@@ -79,20 +86,6 @@ def init():
         },
         True,
     )
-
-    schedulers = {
-        "LMS": LMSDiscreteScheduler(
-            beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear"
-        ),
-        "DDIM": DDIMScheduler(
-            beta_start=0.00085,
-            beta_end=0.012,
-            beta_schedule="scaled_linear",
-            clip_sample=False,
-            set_alpha_to_one=False,
-        ),
-        "PNDM": PNDMScheduler(),
-    }
 
     dummy_safety_checker = DummySafetyChecker()
 
@@ -107,6 +100,7 @@ def init():
         pipelines = createPipelinesFromModel(model)
 
     send("init", "done")
+    initTime = get_now() - initStart
 
 
 def decodeBase64Image(imageStr: str, name: str) -> PIL.Image:
@@ -125,6 +119,8 @@ def truncateInputs(inputs: dict):
     return clone
 
 
+last_xformers_memory_efficient_attention = {}
+
 # Inference is ran for every server call
 # Reference your preloaded global model variable here.
 def inference(all_inputs: dict) -> dict:
@@ -133,15 +129,22 @@ def inference(all_inputs: dict) -> dict:
     global last_model_id
     global schedulers
     global dummy_safety_checker
+    global last_xformers_memory_efficient_attention
 
     print(json.dumps(truncateInputs(all_inputs), indent=2))
     model_inputs = all_inputs.get("modelInputs", None)
     call_inputs = all_inputs.get("callInputs", None)
-    startRequestId = call_inputs.get("startRequestId", None)
 
-    # Fallback until all clients on new code
-    if model_inputs == None:
-        return {"$error": "UPGRADE CLIENT - no model_inputs specified"}
+    if model_inputs == None or call_inputs == None:
+        return {
+            "$error": {
+                "code": "INVALID_INPUTS",
+                "message": "Expecting on object like { modelInputs: {}, callInputs: {} } but got "
+                + json.dumps(all_inputs),
+            }
+        }
+
+    startRequestId = call_inputs.get("startRequestId", None)
 
     model_id = call_inputs.get("MODEL_ID")
     if MODEL_ID == "ALL":
@@ -165,7 +168,16 @@ def inference(all_inputs: dict) -> dict:
     else:
         pipeline = model
 
-    pipeline.scheduler = schedulers.get(call_inputs.get("SCHEDULER"))
+    pipeline.scheduler = getScheduler(MODEL_ID, call_inputs.get("SCHEDULER", None))
+    if pipeline.scheduler == None:
+        return {
+            "$error": {
+                "code": "INVALID_SCHEDULER",
+                "message": "",
+                "requeted": call_inputs.get("SCHEDULER", None),
+                "available": ", ".join(SCHEDULERS),
+            }
+        }
 
     safety_checker = call_inputs.get("safety_checker", True)
     pipeline.safety_checker = (
@@ -207,7 +219,41 @@ def inference(all_inputs: dict) -> dict:
 
     model_inputs.update({"generator": generator})
 
+    inferenceStart = get_now()
     send("inference", "start", {"startRequestId": startRequestId}, True)
+
+    # Run patchmatch for inpainting
+    if call_inputs.get("FILL_MODE", None) == "patchmatch":
+        sel_buffer = np.array(model_inputs.get("init_image"))
+        img = sel_buffer[:, :, 0:3]
+        mask = sel_buffer[:, :, -1]
+        img = patch_match.inpaint(img, mask=255 - mask, patch_size=3)
+        model_inputs["init_image"] = PIL.Image.fromarray(img)
+        mask = 255 - mask
+        mask = skimage.measure.block_reduce(mask, (8, 8), np.max)
+        mask = mask.repeat(8, axis=0).repeat(8, axis=1)
+        model_inputs["mask_image"] = PIL.Image.fromarray(mask)
+
+    # Turning on takes 3ms and turning off 1ms... don't worry, I've got your back :)
+    x_m_e_a = call_inputs.get("xformers_memory_efficient_attention", True)
+    last_x_m_e_a = last_xformers_memory_efficient_attention.get(pipeline, None)
+    if x_m_e_a != last_x_m_e_a:
+        if x_m_e_a == True:
+            print("pipeline.enable_xformers_memory_efficient_attention()")
+            pipeline.enable_xformers_memory_efficient_attention()  # default on
+        elif x_m_e_a == False:
+            print("pipeline.disable_xformers_memory_efficient_attention()")
+            pipeline.disable_xformers_memory_efficient_attention()
+        else:
+            return {
+                "$error": {
+                    "code": "INVALID_XFORMERS_MEMORY_EFFICIENT_ATTENTION_VALUE",
+                    "message": f'Model "{model_id}" not available on this container which hosts "{MODEL_ID}"',
+                    "requested": x_m_e_a,
+                    "available": [True, False],
+                }
+            }
+        last_xformers_memory_efficient_attention.update({pipeline: x_m_e_a})
 
     # Run the model
     # with autocast("cuda"):
@@ -229,9 +275,11 @@ def inference(all_inputs: dict) -> dict:
         images_base64.append(base64.b64encode(buffered.getvalue()).decode("utf-8"))
 
     send("inference", "done", {"startRequestId": startRequestId})
+    inferenceTime = get_now() - inferenceStart
+    timings = {"init": initTime, "inference": inferenceTime}
 
     # Return the results as a dictionary
     if len(images_base64) > 1:
-        return {"images_base64": images_base64}
+        return {"images_base64": images_base64, "$timings": timings}
 
-    return {"image_base64": images_base64[0]}
+    return {"image_base64": images_base64[0], "$timings": timings}
